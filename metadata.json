@@ -1,0 +1,6 @@
+{
+  "name": "Rota Verde — Marmorarias",
+  "description": "Web app instalável para organizar visitas e entregas em marmorarias com mapa, Google Maps, WhatsApp e acompanhamento da equipe.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
