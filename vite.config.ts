@@ -2,11 +2,15 @@ import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import fs from 'fs';
 import path from 'path';
+import {fileURLToPath} from 'node:url';
 import {defineConfig} from 'vite';
 import {VitePWA} from 'vite-plugin-pwa';
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
 export default defineConfig(() => {
   return {
+    cacheDir: '.vite-cache',
     plugins: [
       react(),
       tailwindcss(),
@@ -21,10 +25,10 @@ export default defineConfig(() => {
         ],
         manifest: {
           id: '/',
-          name: 'Rota Verde — Marmorarias',
-          short_name: 'Rota Verde',
+          name: 'Rota Italik — Marmorarias',
+          short_name: 'Rota Italik',
           description:
-            'Organize visitas e entregas em marmorarias com mapa, Google Maps, WhatsApp e acompanhamento da equipe.',
+            'Organize visitas e entregas em marmorarias com mapa, Google Maps, WhatsApp.',
           theme_color: '#0d100e',
           background_color: '#0d100e',
           display: 'standalone',
@@ -63,6 +67,9 @@ export default defineConfig(() => {
         },
         workbox: {
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
+          cleanupOutdatedCaches: true,
+          clientsClaim: true,
+          skipWaiting: true,
           navigateFallback: '/index.html',
           navigateFallbackDenylist: [/^\/api\//, /^\/ws/],
           runtimeCaching: [
@@ -100,8 +107,8 @@ export default defineConfig(() => {
               options: {
                 cacheName: 'osm-tiles-cache',
                 expiration: {
-                  maxEntries: 180,
-                  maxAgeSeconds: 60 * 60 * 24 * 7,
+                  maxEntries: 500,
+                  maxAgeSeconds: 60 * 60 * 24 * 30,
                 },
                 cacheableResponse: {
                   statuses: [0, 200],

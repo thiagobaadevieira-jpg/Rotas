@@ -1,5 +1,5 @@
-import {Check, Link2, MapPin, X} from 'lucide-react';
-import {useEffect, useState} from 'react';
+import {Check, Link2, LocateFixed, X} from 'lucide-react';
+import {useEffect, useRef, useState} from 'react';
 import type {Coordinates, Marmoraria} from '../types.ts';
 import {
   formatCoordinates,
@@ -47,10 +47,29 @@ export function MarmorariaModal({
   const [showMapPicker, setShowMapPicker] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [resolvingLink, setResolvingLink] = useState(false);
+  const [locating, setLocating] = useState(false);
+  const [locationAccuracy, setLocationAccuracy] = useState<number | null>(null);
+  const watchIdRef = useRef<number | null>(null);
+  const locationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const stopLocating = () => {
+    if (watchIdRef.current !== null) navigator.geolocation.clearWatch(watchIdRef.current);
+    if (locationTimerRef.current !== null) clearTimeout(locationTimerRef.current);
+    watchIdRef.current = null;
+    locationTimerRef.current = null;
+    setLocating(false);
+  };
+
+  useEffect(() => () => {
+    if (watchIdRef.current !== null) navigator.geolocation.clearWatch(watchIdRef.current);
+    if (locationTimerRef.current !== null) clearTimeout(locationTimerRef.current);
+  }, []);
 
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen) {stopLocating(); return;}
     setError(null);
+    setLocating(false);
+    setLocationAccuracy(null);
     if (initialData) {
       setNome(initialData.nome);
       setCidade(initialData.cidade);
@@ -77,7 +96,9 @@ export function MarmorariaModal({
   if (!isOpen) return null;
 
   const handleCoordsChange = async (value: string) => {
+    if (watchIdRef.current !== null) stopLocating();
     setCoordsInput(value);
+    setLocationAccuracy(null);
     setError(null);
 
     const direct = parseCoordinatesInput(value);
@@ -115,9 +136,46 @@ export function MarmorariaModal({
   };
 
   const handleMapPick = (coords: Coordinates) => {
+    if (watchIdRef.current !== null) stopLocating();
     setPickedCoords(coords);
     setCoordsInput(formatCoordinates(coords.lat, coords.lng));
+    setLocationAccuracy(null);
     setError(null);
+  };
+
+  const handleUseCurrentLocation = () => {
+    if (!navigator.geolocation) {
+      setError('Este navegador não oferece acesso à localização.');
+      return;
+    }
+    stopLocating();
+    setLocating(true);
+    setError(null);
+    setLocationAccuracy(null);
+    watchIdRef.current = navigator.geolocation.watchPosition(
+      (position) => {
+        const accuracy = Math.round(position.coords.accuracy);
+        setLocationAccuracy(accuracy);
+        if (!Number.isFinite(accuracy) || accuracy > 50) return;
+        const coords = {lat: position.coords.latitude, lng: position.coords.longitude};
+        if (!isValidCoordinates(coords.lat, coords.lng)) return;
+        stopLocating();
+        setPickedCoords(coords);
+        setCoordsInput(formatCoordinates(coords.lat, coords.lng));
+        setShowMapPicker(true);
+      },
+      (locationError) => {
+        stopLocating();
+        setError(locationError.code === 1
+          ? 'Permita o acesso à localização no navegador para usar o ponto atual.'
+          : 'Não foi possível obter sua localização. Tente novamente em um local com sinal de GPS.');
+      },
+      {enableHighAccuracy: true, maximumAge: 0, timeout: 20000}
+    );
+    locationTimerRef.current = setTimeout(() => {
+      stopLocating();
+      setError('A localização recebida não foi precisa o suficiente. Use o GPS do celular em local aberto ou marque o ponto manualmente no mapa.');
+    }, 21000);
   };
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -153,7 +211,7 @@ export function MarmorariaModal({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 p-0 backdrop-blur-sm sm:items-center sm:p-4">
+    <div className="app-modal-backdrop fixed inset-0 z-50 flex items-end justify-center bg-black/70 p-0 backdrop-blur-sm sm:items-center sm:p-4">
       <div className="max-h-[92vh] w-full max-w-xl overflow-y-auto rounded-t-3xl border border-[#283129] bg-[#141915] p-5 shadow-2xl sm:rounded-3xl">
         <div className="flex items-center justify-between gap-3">
           <h2 className="text-lg font-bold text-[#f3f5f2]">
@@ -216,18 +274,10 @@ export function MarmorariaModal({
           </div>
 
           <div>
-            <div className="mb-1.5 flex items-center justify-between gap-2">
+            <div className="mb-1.5">
               <label className="text-xs font-semibold text-[#d5dcd4]">
                 Coordenadas (latitude, longitude ou link do Google Maps)
               </label>
-              <button
-                type="button"
-                onClick={() => setShowMapPicker((prev) => !prev)}
-                className="inline-flex min-h-[34px] items-center gap-1 text-xs font-semibold text-[#ff873f] hover:underline"
-              >
-                <MapPin className="h-3.5 w-3.5" />
-                <span>{showMapPicker ? 'Ocultar mapa' : 'Marcar no mapa'}</span>
-              </button>
             </div>
 
             <div className="relative">
@@ -246,6 +296,20 @@ export function MarmorariaModal({
                 )
               )}
             </div>
+            <button
+              type="button"
+              onClick={handleUseCurrentLocation}
+              disabled={locating}
+              className="mt-2 inline-flex min-h-[44px] items-center gap-2 rounded-xl border border-[#baff27]/50 bg-[#baff27]/10 px-3.5 text-xs font-bold text-[#baff27] hover:bg-[#baff27]/20 disabled:cursor-wait disabled:opacity-60"
+            >
+              <LocateFixed className={`h-4 w-4 ${locating ? 'animate-pulse' : ''}`} />
+              {locating ? 'Obtendo localização...' : 'Localização atual'}
+            </button>
+            {locationAccuracy !== null && (
+              <p role="status" className="mt-1.5 text-[11px] text-[#9aa59c]">
+                {locating ? `Aguardando GPS mais preciso (leitura atual: ±${locationAccuracy} m)...` : `Coordenadas do GPS (precisão aproximada: ±${locationAccuracy} m). Confira o ponto antes de salvar.`}
+              </p>
+            )}
             <p className="mt-1 text-[11px] text-[#7b877e]">
               Aceita latitude e longitude coladas juntas ou links longos/curtos do Google Maps.
             </p>

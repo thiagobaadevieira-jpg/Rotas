@@ -1,17 +1,28 @@
 import {ChevronRight, Navigation, Plus, Route as RouteIcon} from 'lucide-react';
-import type {RoutePlan} from '../types.ts';
+import {COMPANY_DESTINATION_ID, getArrivedStopId} from '../types.ts';
+import type {CompanyLocation, RoutePlan} from '../types.ts';
+import type {RouteDistance} from '../hooks/useRouteDistances.ts';
+import {formatDistancePt} from '../utils/geo.ts';
+import {useState} from 'react';
 
 interface RoutesListViewProps {
   routes: RoutePlan[];
+  company: CompanyLocation | null;
+  distances: Record<string, RouteDistance>;
   onOpenRoute: (routeId: string) => void;
   onCreateRoute: () => void;
+  onFinishRoute: (routeId: string) => void;
 }
 
 export function RoutesListView({
   routes,
+  company,
+  distances,
   onOpenRoute,
   onCreateRoute,
+  onFinishRoute,
 }: RoutesListViewProps) {
+  const [routeToFinish, setRouteToFinish] = useState<RoutePlan | null>(null);
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-4">
@@ -41,42 +52,87 @@ export function RoutesListView({
           </p>
         </div>
       ) : (
-        <ul className="divide-y divide-[#222a23] overflow-hidden rounded-2xl border border-[#242c25] bg-[#151a16]">
+        <ul className="space-y-2">
           {routes.map((route) => {
             const totalStops = route.stops.length;
+            const metrics = distances[route.id];
             const currentDest = route.stops.find(
               (s) => s.stopId === route.currentDestinationStopId && s.status === 'pendente'
             );
+            const arrivedStop = route.stops.find(
+              (s) => s.stopId === getArrivedStopId(route.currentDestinationStopId) && s.status === 'pendente'
+            );
+            const completed = route.stops.length > 0 && route.stops.every((s) => s.status === 'concluida');
 
             return (
-              <li key={route.id}>
+              <li key={route.id} className="flex items-start overflow-hidden rounded-2xl border border-[#242c25] bg-[#151a16]">
                 <button
                   type="button"
                   onClick={() => onOpenRoute(route.id)}
-                  className="flex min-h-[64px] w-full items-center justify-between gap-3 px-4 py-3.5 text-left transition-colors hover:bg-[#1b221c] active:bg-[#202821]"
+                  className="min-h-[64px] min-w-0 flex-1 px-4 py-3.5 text-left transition-colors hover:bg-[#1b221c] active:bg-[#202821]"
                 >
-                  <div className="min-w-0 flex-1">
+                  <div className="min-w-0">
                     <p className="truncate text-sm font-semibold text-[#f3f5f2] sm:text-base">
                       {route.nome} -{' '}
-                      <span className="tabular-nums text-[#ff873f]">
+                      <span className="tabular-nums text-[#baff27]">
                         {totalStops} {totalStops === 1 ? 'parada' : 'paradas'}
                       </span>
                     </p>
-                    {currentDest && route.activeDriverName && (
+                    <p className="mt-1 text-[11px] text-[#9aa59c] tabular-nums">
+                      {!company ? 'Cadastre a empresa para calcular os km' : metrics ? `${formatDistancePt(metrics.meters)} no percurso completo` : 'Calculando km...'}
+                    </p>
+                    {route.status === 'finalizada' ? (
+                      <p className="mt-1.5 text-xs font-semibold text-[#baff27]">
+                        {completed ? 'Rota concluída' : 'Rota encerrada'}
+                      </p>
+                    ) : arrivedStop && route.activeDriverName ? (
+                      <p className="mt-1.5 text-xs font-semibold text-[#baff27]">
+                        {route.activeDriverName} chegou em {arrivedStop.nome}
+                      </p>
+                    ) : (currentDest || (company && route.currentDestinationStopId === COMPANY_DESTINATION_ID)) && route.activeDriverName && (
                       <p className="mt-1.5 flex items-center gap-1.5 text-xs font-semibold text-[#ff873f]">
                         <Navigation className="h-3.5 w-3.5 shrink-0" />
                         <span>
-                          {route.activeDriverName} em rota para {currentDest.nome}
+                          {route.activeDriverName}{currentDest ? '' : ' -'} em rota para {currentDest?.nome || company?.name}
                         </span>
                       </p>
                     )}
                   </div>
-                  <ChevronRight className="h-5 w-5 shrink-0 text-[#6e7b70]" />
+                </button>
+                {route.status !== 'finalizada' && totalStops > 0 && (
+                  <button type="button" onClick={() => setRouteToFinish(route)}
+                    className="mt-3.5 min-h-[40px] shrink-0 rounded-xl border border-[#baff27]/50 bg-[#baff27]/10 px-2.5 text-[11px] font-bold text-[#baff27] sm:px-3 sm:text-xs">
+                    Finalizar rota
+                  </button>
+                )}
+                <button type="button" onClick={() => onOpenRoute(route.id)}
+                  aria-label={`Abrir rota ${route.nome}`}
+                  className="mt-3.5 mr-2 inline-flex min-h-[40px] min-w-[40px] shrink-0 items-center justify-center rounded-xl text-[#baff27] hover:bg-[#baff27]/10">
+                  <ChevronRight className="h-5 w-5" />
                 </button>
               </li>
             );
           })}
         </ul>
+      )}
+      {routeToFinish && (
+        <div className="app-modal-backdrop fixed inset-0 z-[1000] flex items-center justify-center bg-black/75 px-4">
+          <div role="dialog" aria-modal="true" aria-labelledby="finish-list-route-title"
+            className="w-full max-w-sm rounded-2xl border border-[#394539] bg-[#151a16] p-5 shadow-2xl">
+            <h2 id="finish-list-route-title" className="text-lg font-bold text-[#f3f5f2]">Finalizar {routeToFinish.nome}?</h2>
+            <p className="mt-2 text-sm text-[#bdc7bd]">
+              {routeToFinish.stops.filter((stop) => stop.status === 'pendente').length > 0
+                ? `${routeToFinish.stops.filter((stop) => stop.status === 'pendente').length} parada(s) continuarão pendentes. O card mostrará “Rota encerrada”.`
+                : 'O card mostrará o resultado final da rota.'}
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button type="button" onClick={() => setRouteToFinish(null)}
+                className="min-h-[44px] rounded-xl border border-[#394539] px-4 text-sm text-[#e3e8e2]">Cancelar</button>
+              <button type="button" onClick={() => {onFinishRoute(routeToFinish.id); setRouteToFinish(null);}}
+                className="min-h-[44px] rounded-xl bg-[#baff27] px-4 text-sm font-bold text-[#0d100e]">Finalizar rota</button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

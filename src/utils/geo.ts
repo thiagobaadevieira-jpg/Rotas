@@ -1,4 +1,4 @@
-import type {Coordinates, RouteStop} from '../types.ts';
+import type {CompanyLocation, Coordinates, RouteStop} from '../types.ts';
 
 export function isValidCoordinates(lat: number, lng: number): boolean {
   return (
@@ -128,18 +128,22 @@ const MAX_STOPS_PER_GOOGLE_MAPS_LINK = 9;
 
 export function buildChunkedGoogleMapsRouteLinks(
   pendingStops: RouteStop[],
-  origin?: Coordinates | null
+  origin?: Coordinates | null,
+  company?: CompanyLocation | null
 ): GoogleMapsRouteSegment[] {
   if (pendingStops.length === 0) return [];
 
-  const chunks: RouteStop[][] = [];
-  for (let i = 0; i < pendingStops.length; i += MAX_STOPS_PER_GOOGLE_MAPS_LINK) {
-    chunks.push(pendingStops.slice(i, i + MAX_STOPS_PER_GOOGLE_MAPS_LINK));
+  const destinations: Array<{lat: number; lng: number}> = company
+    ? [...pendingStops, company]
+    : pendingStops;
+  const chunks: Array<Array<{lat: number; lng: number}>> = [];
+  for (let i = 0; i < destinations.length; i += MAX_STOPS_PER_GOOGLE_MAPS_LINK) {
+    chunks.push(destinations.slice(i, i + MAX_STOPS_PER_GOOGLE_MAPS_LINK));
   }
 
   return chunks.map((chunk, idx) => {
     const startNumber = idx * MAX_STOPS_PER_GOOGLE_MAPS_LINK + 1;
-    const endNumber = startNumber + chunk.length - 1;
+    const endNumber = Math.min(pendingStops.length, startNumber + chunk.length - 1);
     const destination = chunk[chunk.length - 1];
     const waypoints = chunk.slice(0, -1);
 
@@ -172,8 +176,8 @@ export function buildChunkedGoogleMapsRouteLinks(
       totalParts: chunks.length,
       label:
         chunks.length === 1
-          ? `Abrir rota no Google Maps (${chunk.length} ${chunk.length === 1 ? 'parada' : 'paradas'})`
-          : `Parte ${idx + 1} de ${chunks.length} (Paradas ${startNumber} a ${endNumber})`,
+          ? `Abrir rota no Google Maps (${pendingStops.length} ${pendingStops.length === 1 ? 'parada' : 'paradas'}${company ? ' + empresa' : ''})`
+          : `Parte ${idx + 1} de ${chunks.length} (${startNumber <= endNumber ? `paradas ${startNumber} a ${endNumber}${company && idx === chunks.length - 1 ? ' + empresa' : ''}` : 'volta à empresa'})`,
       stopsCount: chunk.length,
       startStopNumber: startNumber,
       endStopNumber: endNumber,
@@ -354,5 +358,64 @@ export async function fetchRouteLegEstimates(
   } finally {
     clearTimeout(timeoutId);
   }
+}
+
+// Order pending stops by the fastest road leg from the current position, then from each stop.
+export async function organizeStopsByTravelTime(
+  origin: Coordinates,
+  stops: Array<{stopId: string; lat: number; lng: number}>
+): Promise<{stopIds: string[]; source: 'osrm' | 'estimativa'}> {
+  const points = [origin, ...stops];
+  let durations: Array<Array<number | null>> | null = null;
+  if (points.length <= 50 && typeof navigator !== 'undefined' && navigator.onLine !== false) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 7000);
+    try {
+      const coords = points.map((p) => `${p.lng},${p.lat}`).join(';');
+      const res = await fetch(
+        `https://router.project-osrm.org/table/v1/driving/${coords}?annotations=duration`,
+        {signal: controller.signal}
+      );
+      if (res.ok) {
+        const data = (await res.json()) as {
+          code?: string;
+          durations?: Array<Array<number | null>>;
+        };
+        if (data.code === 'Ok' && data.durations?.length === points.length &&
+            data.durations.every((row) => row.length === points.length)) {
+          durations = data.durations;
+        }
+      }
+    } catch {
+      // Fall back to a geographic estimate when the routing service is unavailable.
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  let usedEstimate = !durations;
+  const remaining = new Set(stops.map((_, index) => index + 1));
+  const stopIds: string[] = [];
+  let from = 0;
+  while (remaining.size > 0) {
+    let nearest = -1;
+    let shortest = Infinity;
+    for (const candidate of remaining) {
+      const roadTime = durations?.[from]?.[candidate];
+      if (roadTime == null || !Number.isFinite(roadTime)) usedEstimate = true;
+      const travelTime = roadTime != null && Number.isFinite(roadTime)
+        ? roadTime
+        : (haversineMeters(points[from], points[candidate]) * 1.28 / 1000 / 55) * 3600;
+      if (travelTime < shortest) {
+        shortest = travelTime;
+        nearest = candidate;
+      }
+    }
+    if (nearest < 0) break;
+    stopIds.push(stops[nearest - 1].stopId);
+    remaining.delete(nearest);
+    from = nearest;
+  }
+  return {stopIds, source: usedEstimate ? 'estimativa' : 'osrm'};
 }
 

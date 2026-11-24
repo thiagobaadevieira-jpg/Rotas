@@ -3,10 +3,14 @@
 @layer base {
   :root {
     color-scheme: dark;
+    --app-header-height: 52px;
+    --app-bottom-nav-height: 64px;
+    --app-safe-top: env(safe-area-inset-top, 0px);
+    --app-safe-bottom: env(safe-area-inset-bottom, 0px);
   }
 
   body {
-    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-family: Arial, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     background-color: #0d100e;
     color: #f3f5f2;
     overscroll-behavior-y: contain;
@@ -38,9 +42,109 @@ body,
   padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 
+.app-shell {
+  padding-bottom: calc(var(--app-bottom-nav-height) + var(--app-safe-bottom) + 24px);
+}
+
+.app-header {
+  padding-top: var(--app-safe-top);
+}
+
+.app-header-row {
+  height: var(--app-header-height);
+}
+
+.address-header-sticky {
+  position: sticky;
+  top: calc(var(--app-header-height) + var(--app-safe-top));
+  z-index: 25;
+  box-shadow: 0 1px 0 rgba(38, 47, 39, 0.8);
+}
+
+.app-bottom-nav {
+  padding-bottom: var(--app-safe-bottom);
+  transform: translate3d(0, 0, 0);
+  backface-visibility: hidden;
+  transition: transform 160ms ease, opacity 160ms ease;
+}
+
+.app-bottom-nav-row {
+  height: var(--app-bottom-nav-height);
+}
+
+.address-fab {
+  bottom: calc(var(--app-bottom-nav-height) + var(--app-safe-bottom) + 16px);
+  transition: transform 160ms ease, opacity 160ms ease;
+}
+
+.app-modal-backdrop {
+  align-items: flex-start !important;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-top: calc(var(--app-safe-top) + 12px) !important;
+  padding-right: 12px !important;
+  padding-bottom: calc(var(--app-safe-bottom) + 12px) !important;
+  padding-left: 12px !important;
+}
+
+  .app-modal-backdrop.app-modal-centered {
+    align-items: center !important;
+  }
+
+.route-map-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  padding-top: calc(var(--app-safe-top) + 18px);
+  padding-right: 8px;
+  padding-bottom: calc(var(--app-safe-bottom) + 8px);
+  padding-left: 8px;
+  background: #0d100e;
+}
+
+.route-map-collapse,
+.route-map-recalculate {
+  top: calc(var(--app-safe-top) + 22px);
+}
+
+.route-map-order-panel {
+  bottom: calc(var(--app-safe-bottom) + 18px);
+}
+
+@media (max-width: 639px) {
+  body:has(input:focus, textarea:focus, [contenteditable="true"]:focus) .app-bottom-nav {
+    transform: translate3d(0, calc(100% + var(--app-safe-bottom)), 0);
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  body:has(input:focus, textarea:focus, [contenteditable="true"]:focus) .address-fab {
+    transform: translate3d(0, 24px, 0);
+    opacity: 0;
+    pointer-events: none;
+  }
+}
+
+.create-route-backdrop {
+  padding-top: var(--app-safe-top);
+}
+
+.create-route-dialog {
+  height: min(88dvh, 700px);
+  max-height: calc(100dvh - var(--app-safe-top));
+  padding-bottom: max(20px, var(--app-safe-bottom));
+}
+
 /* Discreet light OpenStreetMap layer styling inside dark UI */
 .rota-leaflet-container .leaflet-tile-pane {
   filter: saturate(0.62) contrast(0.94) brightness(1.02);
+}
+
+/* Tailwind's global responsive image rule can collapse Leaflet tiles when the
+   map container changes size (notably when entering fullscreen). */
+.rota-leaflet-container img.leaflet-tile {
+  max-width: none !important;
+  max-height: none !important;
 }
 
 .rota-leaflet-container .leaflet-control-attribution {
@@ -107,6 +211,12 @@ body,
   color: #baff27;
 }
 
+.rota-stop-label--manual {
+  border-color: #baff27;
+  color: #baff27;
+  background: rgba(13, 16, 14, 0.98);
+}
+
 .rota-stop-dot {
   width: 24px;
   height: 24px;
@@ -131,4 +241,10 @@ body,
   background: #baff27;
   color: #0d100e;
   box-shadow: 0 0 0 3px rgba(186, 255, 39, 0.35), 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+
+.rota-stop-dot--manual {
+  background: #baff27;
+  color: #0d100e;
+  box-shadow: 0 0 0 4px rgba(186, 255, 39, 0.3), 0 2px 8px rgba(0, 0, 0, 0.5);
 }

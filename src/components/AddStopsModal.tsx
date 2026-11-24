@@ -6,25 +6,32 @@ interface AddStopsModalProps {
   isOpen: boolean;
   marmorarias: Marmoraria[];
   currentStops: RouteStop[];
+  routeId: string | null;
   onClose: () => void;
-  onApply: (selectedMarmorariaIds: string[]) => void;
+  onApply: (selectedMarmorariaIds: string[]) => Promise<void>;
 }
 
 export function AddStopsModal({
   isOpen,
   marmorarias,
   currentStops,
+  routeId,
   onClose,
   onApply,
 }: AddStopsModalProps) {
   const [query, setQuery] = useState('');
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isOpen) return;
     setQuery('');
-    setSelectedIds(currentStops.map((s) => s.marmorariaId));
-  }, [isOpen, currentStops]);
+    setError(null);
+    setSelectedIds(currentStops.map((s) => s.marmorariaId).filter(Boolean));
+    // A seleção inicial só é lida ao abrir a janela ou trocar de rota.
+    // Atualizações da rota enquanto a janela está aberta não podem desfazer escolhas.
+  }, [isOpen, routeId]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -42,8 +49,21 @@ export function AddStopsModal({
     );
   };
 
+  const applySelection = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      await onApply(selectedIds);
+      onClose();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Não foi possível salvar as paradas.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 p-0 backdrop-blur-sm sm:items-center sm:p-4">
+    <div className="app-modal-backdrop fixed inset-0 z-50 flex items-end justify-center bg-black/70 p-0 backdrop-blur-sm sm:items-center sm:p-4">
       <div className="flex h-[82dvh] max-h-[88dvh] w-full max-w-lg flex-col rounded-t-3xl border border-[#283129] bg-[#141915] p-5 shadow-2xl sm:h-[620px] sm:rounded-3xl">
         <div className="flex shrink-0 items-center justify-between gap-3">
           <div>
@@ -119,9 +139,15 @@ export function AddStopsModal({
         </div>
 
         <div className="mt-4 flex items-center justify-between gap-3 border-t border-[#222a23] pt-3">
-          <span className="text-xs text-[#9aa59c] tabular-nums">
-            {selectedIds.length} selecionadas
-          </span>
+          <div>
+            <span className="text-xs text-[#9aa59c] tabular-nums">{selectedIds.length} selecionadas</span>
+            {selectedIds.length > 0 && (
+              <button type="button" onClick={() => setSelectedIds([])} className="ml-2 min-h-[36px] text-xs font-semibold text-[#ff873f] underline">
+                Desmarcar todas
+              </button>
+            )}
+            {error && <p role="alert" className="mt-1 max-w-[240px] text-xs text-[#ff873f]">{error}</p>}
+          </div>
           <div className="flex gap-2">
             <button
               type="button"
@@ -132,13 +158,11 @@ export function AddStopsModal({
             </button>
             <button
               type="button"
-              onClick={() => {
-                onApply(selectedIds);
-                onClose();
-              }}
-              className="min-h-[44px] rounded-xl bg-[#baff27] px-5 text-xs font-bold text-[#0d100e]"
+              onClick={() => void applySelection()}
+              disabled={saving}
+              className="min-h-[44px] rounded-xl bg-[#baff27] px-5 text-xs font-bold text-[#0d100e] disabled:opacity-60"
             >
-              Confirmar paradas
+              {saving ? 'Salvando...' : 'Confirmar paradas'}
             </button>
           </div>
         </div>

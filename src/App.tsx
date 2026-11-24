@@ -1,91 +1,184 @@
-import {Compass, MapPin, Route as RouteIcon, WifiOff} from 'lucide-react';
+import {AlertCircle, BarChart3, Check, CheckCircle2, Loader2, LogOut, MapPin, Route as RouteIcon, Send, Settings, WifiOff, X} from 'lucide-react';
 import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {AddStopsModal} from './components/AddStopsModal.tsx';
 import {AddressesView} from './components/AddressesView.tsx';
 import {CreateRouteModal} from './components/CreateRouteModal.tsx';
-import {LocateView} from './components/LocateView.tsx';
 import {MarmorariaModal} from './components/MarmorariaModal.tsx';
+import {LoginScreen} from './components/LoginScreen.tsx';
+import {PhoneModal} from './components/PhoneModal.tsx';
 import {RouteDetailView} from './components/RouteDetailView.tsx';
+import {ReportsView} from './components/ReportsView.tsx';
 import {RoutesListView} from './components/RoutesListView.tsx';
-import {TeamDrawer} from './components/TeamDrawer.tsx';
+import {SettingsModal} from './components/SettingsModal.tsx';
 import {WhatsAppModal} from './components/WhatsAppModal.tsx';
-import {
-  DEFAULT_WHATSAPP_TEMPLATES,
-  DEMO_MARMORARIAS,
-  DEMO_ROUTES,
-} from './data/demoData.ts';
+import {DEFAULT_WHATSAPP_TEMPLATES} from './data/demoData.ts';
 import {useOnlineStatus} from './hooks/useOnlineStatus.ts';
+import {useRouteDistances} from './hooks/useRouteDistances.ts';
+import {loadAppData, loadProfile, supabase} from './lib/supabase.ts';
+import type {AppData, Profile} from './lib/supabase.ts';
+import {cacheData, clearLastOfflineUser, flushChanges, lastOfflineUser, newChangeId, queueChange, readOffline, readWebhookStatus} from './lib/offlineStore.ts';
+import type {PendingChange, WebhookDispatchStatus, WebhookHistoryItem} from './lib/offlineStore.ts';
+import {arrivedDestinationId, COMPANY_DESTINATION_ID, getArrivedStopId} from './types.ts';
 import type {
   Coordinates,
-  DriverLocation,
+  CompanyLocation,
   Marmoraria,
   RoutePlan,
   RouteStop,
   TabId,
-  TeamSession,
-  TeamUser,
   WhatsAppTemplate,
 } from './types.ts';
 import {extractFirstUrl, isGoogleMapsUrl, parseCoordinatesInput} from './utils/geo.ts';
+import {collectionsFromRoutes} from './utils/collections.ts';
 
-const LS_MARMORARIAS = 'rv_marmorarias_v1';
-const LS_ROUTES = 'rv_routes_v1';
-const LS_TEMPLATES = 'rv_templates_v1';
-const LS_LOCAL_NAME = 'rv_local_user_name_v1';
-const LS_TEAM_SESSION = 'rv_team_session_v1';
-const LS_DIRECT_TRAVEL = 'rv_direct_travel_v1';
+const THIAGO_USER_ID = '1e5dc7d4-d1a1-47c4-b06b-21b2021b77ec';
 
-function readLocalJson<T>(key: string, fallback: T): T {
-  try {
-    const raw = localStorage.getItem(key);
-    if (!raw) return fallback;
-    return JSON.parse(raw) as T;
-  } catch {
-    return fallback;
-  }
-}
+const webhookTime = (value?: string) => {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleTimeString('pt-BR', {hour: '2-digit', minute: '2-digit'});
+};
+
+const webhookDateTime = (value?: string) => {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleString('pt-BR', {
+    day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+  });
+};
+
+const webhookStateLabel: Record<WebhookHistoryItem['state'], string> = {
+  pending: 'Pendente',
+  sent: 'Enviado',
+  failed: 'Falhou',
+};
 
 export default function App() {
   const isOnline = useOnlineStatus();
+  const [userId, setUserId] = useState<string | null>(null);
+  const [profile, setProfile] = useState<Profile | null>(null);
+  const [remote, setRemote] = useState<AppData | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [dataError, setDataError] = useState<string | null>(null);
+  const [pendingCount, setPendingCount] = useState(0);
+  const [syncing, setSyncing] = useState(false);
+  const [webhookStatus, setWebhookStatus] = useState<WebhookDispatchStatus | null>(null);
+  const [webhookPanelOpen, setWebhookPanelOpen] = useState(false);
+  const [completionToConfirm, setCompletionToConfirm] = useState<{routeId: string; stopId: string; name: string} | null>(null);
+  const syncingRef = useRef(false);
+  const syncAgainRef = useRef(false);
 
-  // Individual mode persistent state
-  const [localMarmorarias, setLocalMarmorarias] = useState<Marmoraria[]>(() =>
-    readLocalJson(LS_MARMORARIAS, DEMO_MARMORARIAS)
-  );
-  const [localRoutes, setLocalRoutes] = useState<RoutePlan[]>(() =>
-    readLocalJson(LS_ROUTES, DEMO_ROUTES)
-  );
-  const [localTemplates, setLocalTemplates] = useState<WhatsAppTemplate[]>(() =>
-    readLocalJson(LS_TEMPLATES, DEFAULT_WHATSAPP_TEMPLATES)
-  );
-  const [localUserName, setLocalUserName] = useState<string>(() => {
+  const syncOfflineData = useCallback(async (id: string) => {
+    if (!navigator.onLine || syncingRef.current) return;
+    syncingRef.current = true;
+    setSyncing(true);
     try {
-      return localStorage.getItem(LS_LOCAL_NAME) || 'Thiago';
-    } catch {
-      return 'Thiago';
+      await flushChanges(id, setPendingCount);
+      setWebhookStatus(readWebhookStatus(id));
+      const [nextProfile, nextData] = await Promise.all([loadProfile(id), loadAppData()]);
+      if ((readOffline(id)?.pending || []).every((change) => change.kind === 'notifyDelivery' || change.kind === 'notifyReturn' || change.kind === 'notifyCancellation')) {
+        cacheData(id, nextProfile, nextData);
+        setProfile(nextProfile);
+        setRemote(nextData);
+        setPendingCount(readOffline(id)?.pending.length || 0);
+      }
+      setDataError(null);
+    } catch (error) {
+      setWebhookStatus(readWebhookStatus(id));
+      setPendingCount(readOffline(id)?.pending.length || 0);
+      if (navigator.onLine) {
+        setDataError(error instanceof Error ? `Sincronização pendente: ${error.message}` : 'Sincronização pendente.');
+      }
+    } finally {
+      syncingRef.current = false;
+      setSyncing(false);
+      if (syncAgainRef.current && navigator.onLine) {
+        syncAgainRef.current = false;
+        setTimeout(() => void syncOfflineData(id), 0);
+      }
     }
-  });
+  }, []);
 
-  // Team mode persistent authenticated state
-  const [session, setSession] = useState<TeamSession | null>(() =>
-    readLocalJson<TeamSession | null>(LS_TEAM_SESSION, null)
-  );
-  const [teamUsers, setTeamUsers] = useState<TeamUser[]>([]);
-  const [teamMarmorarias, setTeamMarmorarias] = useState<Marmoraria[]>([]);
-  const [teamRoutes, setTeamRoutes] = useState<RoutePlan[]>([]);
-  const [teamTemplates, setTeamTemplates] = useState<WhatsAppTemplate[]>([]);
-  const [driverLocations, setDriverLocations] = useState<DriverLocation[]>([]);
+  useEffect(() => {
+    if (!supabase) {setAuthReady(true); return;}
+    let mounted = true;
+    const cachedId = lastOfflineUser();
+    if (!navigator.onLine && cachedId && readOffline(cachedId)) {
+      setUserId(cachedId);
+      setAuthReady(true);
+    } else {
+      void supabase.auth.getUser().then(({data, error}) => {
+        if (!mounted) return;
+        const fallback = error && cachedId && readOffline(cachedId) ? cachedId : null;
+        setUserId(data.user?.id || fallback);
+        setAuthReady(true);
+      }).catch(() => {
+        if (mounted) {setUserId(cachedId && readOffline(cachedId) ? cachedId : null); setAuthReady(true);}
+      });
+    }
+    const {data: listener} = supabase.auth.onAuthStateChange((event, session) => {
+      if (!mounted) return;
+      if (event === 'SIGNED_OUT' && !navigator.onLine && lastOfflineUser()) return;
+      if (session?.user.id) setUserId(session.user.id);
+      else if (event === 'SIGNED_OUT') setUserId(null);
+    });
+    return () => {mounted = false; listener.subscription.unsubscribe();};
+  }, []);
 
-  // Active data based on mode
-  const marmorarias = session ? teamMarmorarias : localMarmorarias;
-  const routes = session ? teamRoutes : localRoutes;
-  const templates = session ? teamTemplates : localTemplates;
-  const currentUserName = session ? session.user.name : localUserName || 'Você';
+  useEffect(() => {
+    if (!userId) {setProfile(null); setRemote(null); setPendingCount(0); setWebhookStatus(null); return;}
+    const snapshot = readOffline(userId);
+    setWebhookStatus(readWebhookStatus(userId));
+    if (snapshot?.profile.active) {
+      setProfile(snapshot.profile);
+      setRemote(snapshot.data);
+      setPendingCount(snapshot.pending.length);
+    }
+    if (navigator.onLine) {
+      void syncOfflineData(userId);
+    } else if (!snapshot) {
+      setDataError('Conecte-se à internet uma vez para carregar suas rotas neste aparelho.');
+    }
+  }, [userId, syncOfflineData]);
+
+  useEffect(() => {
+    if (isOnline && userId && authReady) void syncOfflineData(userId);
+  }, [isOnline, userId, authReady, syncOfflineData]);
+
+  const commitChange = useCallback(async (nextData: AppData, change: PendingChange) => {
+    if (!userId || !profile) throw new Error('Entre novamente para salvar alterações.');
+    const count = queueChange(userId, profile, nextData, change);
+    setWebhookStatus(readWebhookStatus(userId));
+    setRemote(nextData);
+    setPendingCount(count);
+    setDataError(null);
+    if (navigator.onLine) {
+      if (syncingRef.current) syncAgainRef.current = true;
+      else void syncOfflineData(userId);
+    }
+  }, [userId, profile, syncOfflineData]);
+
+  const reportError = (error: unknown) => {
+    setDataError(error instanceof Error ? error.message : 'Não foi possível salvar. Tente novamente.');
+  };
+
+  const marmorarias = remote?.marmorarias || [];
+  const routes = remote?.routes || [];
+  const templates = remote?.templates || DEFAULT_WHATSAPP_TEMPLATES;
+  const currentUserName = profile?.display_name || 'Você';
+  const collections = useMemo(() => collectionsFromRoutes(routes, marmorarias), [routes, marmorarias]);
+
+  const collectionCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    collections.forEach((record) => {counts[record.marmorariaId] = (counts[record.marmorariaId] || 0) + 1;});
+    return counts;
+  }, [collections]);
 
   // Navigation & UI state
   const [activeTab, setActiveTab] = useState<TabId>('rotas');
   const [selectedRouteId, setSelectedRouteId] = useState<string | null>(null);
-  const [teamDrawerOpen, setTeamDrawerOpen] = useState(false);
   const [createRouteOpen, setCreateRouteOpen] = useState(false);
   const [addStopsOpen, setAddStopsOpen] = useState(false);
 
@@ -102,76 +195,47 @@ export default function App() {
     marmorariaId: string | null;
     routeId: string | null;
     updatedAt: string;
-  } | null>(() => readLocalJson(LS_DIRECT_TRAVEL, null));
+  } | null>(null);
+
+  useEffect(() => {
+    if (!userId) setDirectTravel(null);
+  }, [userId]);
 
   // WhatsApp Modal state
   const [whatsAppTarget, setWhatsAppTarget] = useState<{
     name: string;
     phone: string;
   } | null>(null);
+  const [phoneTarget, setPhoneTarget] = useState<Marmoraria | null>(null);
+
+  const openWhatsAppFor = (target: Marmoraria | RouteStop) => {
+    const saved = marmorarias.find((m) => m.id === ('marmorariaId' in target ? target.marmorariaId : target.id))
+      || marmorarias.find((m) => m.lat === target.lat && m.lng === target.lng);
+    const phone = saved?.telefone ?? target.telefone;
+    if (!phone.trim() && saved) {
+      setPhoneTarget(saved);
+    } else {
+      setWhatsAppTarget({name: target.nome, phone});
+    }
+  };
+
+  const saveCustomerPhone = async (marmoraria: Marmoraria, phone: string) => {
+    if (!remote) throw new Error('Dados indisponíveis.');
+    const updated = {...marmoraria, telefone: phone, updatedAt: new Date().toISOString()};
+    await commitChange({
+      ...remote,
+      marmorarias: remote.marmorarias.map((m) => m.id === updated.id ? updated : m),
+    }, {id: newChangeId(), kind: 'saveMarmoraria', value: updated});
+    setPhoneTarget(null);
+    setWhatsAppTarget({name: updated.nome, phone});
+  };
 
   // Browser Geolocation state
   const [userPosition, setUserPosition] = useState<Coordinates | null>(null);
   const [geoError, setGeoError] = useState<string | null>(null);
-  const lastSentLocRef = useRef<number>(0);
-  const wsRef = useRef<WebSocket | null>(null);
-
-  // Persist local mode changes
-  useEffect(() => {
-    try {
-      localStorage.setItem(LS_MARMORARIAS, JSON.stringify(localMarmorarias));
-    } catch {
-      // Ignore storage quota errors
-    }
-  }, [localMarmorarias]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(LS_ROUTES, JSON.stringify(localRoutes));
-    } catch {
-      // Ignore storage quota errors
-    }
-  }, [localRoutes]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(LS_TEMPLATES, JSON.stringify(localTemplates));
-    } catch {
-      // Ignore storage quota errors
-    }
-  }, [localTemplates]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(LS_LOCAL_NAME, localUserName);
-    } catch {
-      // Ignore storage errors
-    }
-  }, [localUserName]);
-
-  useEffect(() => {
-    try {
-      if (session) {
-        localStorage.setItem(LS_TEAM_SESSION, JSON.stringify(session));
-      } else {
-        localStorage.removeItem(LS_TEAM_SESSION);
-      }
-    } catch {
-      // Ignore storage errors
-    }
-  }, [session]);
-
-  useEffect(() => {
-    try {
-      if (directTravel) {
-        localStorage.setItem(LS_DIRECT_TRAVEL, JSON.stringify(directTravel));
-      } else {
-        localStorage.removeItem(LS_DIRECT_TRAVEL);
-      }
-    } catch {
-      // Ignore storage errors
-    }
-  }, [directTravel]);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const company = remote?.company || null;
+  const {distances: routeDistances, loading: distancesLoading} = useRouteDistances(routes, company);
 
   // Handle PWA Web Share Target incoming URL parameters
   useEffect(() => {
@@ -239,114 +303,13 @@ export default function App() {
     void handleShare();
   }, []);
 
-  // Load initial team state & connect WebSocket when signed in
-  const fetchTeamState = useCallback(async (activeSession: TeamSession) => {
-    try {
-      const res = await fetch('/api/team/state', {
-        headers: {Authorization: `Bearer ${activeSession.token}`},
-      });
-      if (res.status === 401) {
-        setSession(null);
-        setTeamUsers([]);
-        setDriverLocations([]);
-        return;
-      }
-      if (!res.ok) return;
-      const data = (await res.json()) as {
-        users: TeamUser[];
-        marmorarias: Marmoraria[];
-        routes: RoutePlan[];
-        templates: WhatsAppTemplate[];
-        locations: DriverLocation[];
-      };
-      setTeamUsers(data.users || []);
-      setTeamMarmorarias(data.marmorarias || []);
-      setTeamRoutes(data.routes || []);
-      setTeamTemplates(
-        data.templates && data.templates.length > 0 ? data.templates : DEFAULT_WHATSAPP_TEMPLATES
-      );
-      setDriverLocations(data.locations || []);
-    } catch {
-      // Ignore transient network errors
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!session) {
-      if (wsRef.current) {
-        wsRef.current.close();
-        wsRef.current = null;
-      }
-      return;
-    }
-
-    void fetchTeamState(session);
-
-    let closedByEffect = false;
-    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-
-    const connectWs = () => {
-      if (closedByEffect) return;
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        ws.send(JSON.stringify({type: 'auth', token: session.token}));
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const msg = JSON.parse(String(event.data)) as {type: string; payload: unknown};
-          if (msg.type === 'team:users_updated') {
-            setTeamUsers(msg.payload as TeamUser[]);
-          } else if (msg.type === 'team:marmorarias_updated') {
-            setTeamMarmorarias(msg.payload as Marmoraria[]);
-          } else if (msg.type === 'team:routes_updated') {
-            setTeamRoutes(msg.payload as RoutePlan[]);
-          } else if (msg.type === 'team:templates_updated') {
-            setTeamTemplates(msg.payload as WhatsAppTemplate[]);
-          } else if (msg.type === 'team:locations_updated') {
-            setDriverLocations(msg.payload as DriverLocation[]);
-          }
-        } catch {
-          // Ignore malformed message
-        }
-      };
-
-      ws.onclose = () => {
-        if (!closedByEffect) {
-          reconnectTimer = setTimeout(connectWs, 3500);
-        }
-      };
-    };
-
-    connectWs();
-
-    return () => {
-      closedByEffect = true;
-      if (reconnectTimer) clearTimeout(reconnectTimer);
-      if (wsRef.current) {
-        wsRef.current.close();
-        wsRef.current = null;
-      }
-    };
-  }, [session, fetchTeamState]);
-
   const activeRoute = useMemo(
     () => routes.find((r) => r.id === selectedRouteId) || null,
     [routes, selectedRouteId]
   );
 
-  const activeInProgressRoute = useMemo(
-    () => routes.find((r) => r.status === 'em_andamento') || null,
-    [routes]
-  );
-
-  // Request / Watch Geolocation when viewing a route OR when a team driver has a route in progress
-  const shouldWatchGeo = Boolean(
-    selectedRouteId || (session && activeInProgressRoute)
-  );
+  // Current position is only used on the open route for navigation and estimates.
+  const shouldWatchGeo = Boolean(selectedRouteId);
 
   const requestGeolocation = useCallback(() => {
     if (!('geolocation' in navigator)) {
@@ -374,32 +337,6 @@ export default function App() {
         setUserPosition(coords);
         setGeoError(null);
 
-        // If authenticated and executing a route with app open, share location with organizer
-        const runningRoute = activeRoute?.status === 'em_andamento' ? activeRoute : activeInProgressRoute;
-        if (session && runningRoute) {
-          const now = Date.now();
-          if (now - lastSentLocRef.current >= 12000) {
-            lastSentLocRef.current = now;
-            const destStop = runningRoute.stops.find(
-              (s) => s.stopId === runningRoute.currentDestinationStopId
-            );
-            void fetch('/api/team/location', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                Authorization: `Bearer ${session.token}`,
-              },
-              body: JSON.stringify({
-                lat: coords.lat,
-                lng: coords.lng,
-                accuracy: pos.coords.accuracy,
-                routeId: runningRoute.id,
-                routeName: runningRoute.nome,
-                destinationName: destStop?.nome || null,
-              }),
-            }).catch(() => {});
-          }
-        }
       },
       () => {
         setGeoError('Localização indisponível. Verifique a permissão do navegador.');
@@ -408,50 +345,28 @@ export default function App() {
     );
 
     return () => navigator.geolocation.clearWatch(watchId);
-  }, [shouldWatchGeo, session, activeRoute, activeInProgressRoute]);
+  }, [shouldWatchGeo]);
 
-  // Helper to update route in local or team mode
-  const persistRouteUpdate = useCallback(
-    async (updatedRoute: RoutePlan) => {
-      if (session) {
-        setTeamRoutes((prev) => prev.map((r) => (r.id === updatedRoute.id ? updatedRoute : r)));
-        try {
-          await fetch(`/api/team/routes/${updatedRoute.id}`, {
-            method: 'PUT',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${session.token}`,
-            },
-            body: JSON.stringify(updatedRoute),
-          });
-        } catch {
-          // Next WS sync reconciles
-        }
-      } else {
-        setLocalRoutes((prev) => prev.map((r) => (r.id === updatedRoute.id ? updatedRoute : r)));
-      }
-    },
-    [session]
-  );
+  const persistRouteUpdate = useCallback((updatedRoute: RoutePlan, completedStopId?: string, sendReturnNotice = false, returnDurationSec?: number, sendCancellationNotice = false) => {
+    const previous = remote?.routes.find((r) => r.id === updatedRoute.id);
+    if (!remote) return;
+    const nextData = {...remote, routes: remote.routes.map((r) => r.id === updatedRoute.id ? updatedRoute : r)};
+    void commitChange(nextData, {id: newChangeId(), kind: 'saveRoute', value: updatedRoute,
+      previousStopIds: previous?.stops.map((s) => s.stopId) || [],
+      notifyStopId: completedStopId,
+      notifyAt: completedStopId ? updatedRoute.stops.find((s) => s.stopId === completedStopId)?.updatedAt : undefined,
+      notifyReturnAt: sendReturnNotice ? updatedRoute.updatedAt : undefined,
+      returnDurationSec: sendReturnNotice ? returnDurationSec : undefined,
+      notifyCancellationAt: sendCancellationNotice ? updatedRoute.updatedAt : undefined,
+    }).catch(reportError);
+  }, [remote, commitChange]);
 
-  // Opening a route with stops automatically marks it as "em_andamento"
   const handleOpenRoute = useCallback(
     (routeId: string) => {
-      const target = routes.find((r) => r.id === routeId);
       setActiveTab('rotas');
       setSelectedRouteId(routeId);
-
-      if (target && target.stops.length > 0 && target.status !== 'em_andamento') {
-        const nextRoute: RoutePlan = {
-          ...target,
-          status: 'em_andamento',
-          activeDriverName: target.activeDriverName || currentUserName,
-          updatedAt: new Date().toISOString(),
-        };
-        void persistRouteUpdate(nextRoute);
-      }
     },
-    [routes, currentUserName, persistRouteUpdate]
+    []
   );
 
   const handleCreateRoute = async (nome: string, selectedMarmIds: string[]) => {
@@ -480,35 +395,17 @@ export default function App() {
       status: stops.length > 0 ? 'em_andamento' : 'planejada',
       currentDestinationStopId: null,
       activeDriverName: stops.length > 0 ? currentUserName : null,
-      createdByUserId: session?.user.id || 'local-user',
-      createdByName: session?.user.name || localUserName || 'Modo Individual',
+      createdByUserId: profile?.id || '',
+      createdByName: currentUserName,
       createdAt: now,
       updatedAt: now,
     };
 
-    if (session) {
-      setTeamRoutes((prev) => [newRoute, ...prev]);
-      try {
-        const res = await fetch('/api/team/routes', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${session.token}`,
-          },
-          body: JSON.stringify(newRoute),
-        });
-        if (res.ok) {
-          const data = (await res.json()) as {route: RoutePlan};
-          setSelectedRouteId(data.route.id);
-          setActiveTab('rotas');
-          return;
-        }
-      } catch {
-        // Fallback optimistic ID
-      }
-    } else {
-      setLocalRoutes((prev) => [newRoute, ...prev]);
-    }
+    try {
+      if (!remote) throw new Error('Dados indisponíveis.');
+      await commitChange({...remote, routes: [newRoute, ...remote.routes]},
+        {id: newChangeId(), kind: 'saveRoute', value: newRoute, previousStopIds: []});
+    } catch (error) {reportError(error); return;}
     setActiveTab('rotas');
     setSelectedRouteId(newRoute.id);
   };
@@ -520,20 +417,60 @@ export default function App() {
   };
 
   const handleDeleteRoute = async (routeId: string) => {
+    if (profile?.role !== 'admin') return;
+    try {
+      if (!remote) throw new Error('Dados indisponíveis.');
+      await commitChange({...remote, routes: remote.routes.filter((r) => r.id !== routeId)},
+        {id: newChangeId(), kind: 'deleteRoute', value: routeId});
+    } catch (error) {reportError(error); return;}
     setSelectedRouteId(null);
-    if (session) {
-      setTeamRoutes((prev) => prev.filter((r) => r.id !== routeId));
-      await fetch(`/api/team/routes/${routeId}`, {
-        method: 'DELETE',
-        headers: {Authorization: `Bearer ${session.token}`},
-      }).catch(() => {});
-    } else {
-      setLocalRoutes((prev) => prev.filter((r) => r.id !== routeId));
+  };
+
+  const handleCancelRoute = (routeId: string, sendNotice: boolean) => {
+    const target = routes.find((route) => route.id === routeId);
+    if (!target) return;
+    const updatedAt = new Date().toISOString();
+    setDirectTravel((previous) => previous?.routeId === routeId ? null : previous);
+    persistRouteUpdate({
+      ...target,
+      status: 'finalizada',
+      currentDestinationStopId: null,
+      activeDriverName: null,
+      updatedAt,
+    }, undefined, false, undefined, sendNotice && profile?.id === THIAGO_USER_ID && profile.role === 'admin');
+  };
+
+  const handleRemoveStop = async (routeId: string, stopId: string) => {
+    if (profile?.role !== 'admin') throw new Error('Somente um administrador pode excluir paradas.');
+    const target = routes.find((route) => route.id === routeId);
+    if (!target?.stops.some((stop) => stop.stopId === stopId)) {
+      throw new Error('Parada não encontrada. Abra a rota novamente.');
+    }
+    const stops = target.stops.filter((stop) => stop.stopId !== stopId);
+    const nextRoute: RoutePlan = {
+      ...target,
+      stops,
+      status: target.status === 'finalizada' ? 'finalizada' : stops.length > 0 ? 'em_andamento' : 'planejada',
+      currentDestinationStopId: target.currentDestinationStopId === stopId || getArrivedStopId(target.currentDestinationStopId) === stopId
+        ? null : target.currentDestinationStopId,
+      updatedAt: new Date().toISOString(),
+    };
+    try {
+      if (!remote) throw new Error('Dados indisponíveis.');
+      await commitChange({...remote, routes: remote.routes.map((route) => route.id === routeId ? nextRoute : route)},
+        {id: newChangeId(), kind: 'saveRoute', value: nextRoute, previousStopIds: target.stops.map((stop) => stop.stopId)});
+      if (target.currentDestinationStopId === stopId) {
+        setDirectTravel((prev) => prev?.routeId === routeId ? null : prev);
+      }
+      setDataError(null);
+    } catch (error) {
+      reportError(error);
+      throw error;
     }
   };
 
-  const handleApplyRouteStops = (selectedMarmIds: string[]) => {
-    if (!activeRoute) return;
+  const handleApplyRouteStops = async (selectedMarmIds: string[]) => {
+    if (!activeRoute) throw new Error('Rota não encontrada. Abra a rota novamente.');
 
     const existingByMarmId = new Map<string, RouteStop>();
     activeRoute.stops.forEach((s) => existingByMarmId.set(s.marmorariaId, s));
@@ -567,33 +504,26 @@ export default function App() {
     const nextRoute: RoutePlan = {
       ...activeRoute,
       stops: combined,
-      status: nextPending.length > 0 ? 'em_andamento' : activeRoute.status,
+      currentDestinationStopId: combined.some((stop) => stop.stopId === activeRoute.currentDestinationStopId || stop.stopId === getArrivedStopId(activeRoute.currentDestinationStopId))
+        ? activeRoute.currentDestinationStopId : null,
+      status: nextPending.length > 0 ? 'em_andamento' : combined.length > 0 ? 'finalizada' : 'planejada',
       activeDriverName: activeRoute.activeDriverName || currentUserName,
       updatedAt: new Date().toISOString(),
     };
-    void persistRouteUpdate(nextRoute);
+    const previousStopIds = activeRoute.stops.map((stop) => stop.stopId);
+    try {
+      if (!remote) throw new Error('Dados indisponíveis.');
+      await commitChange({...remote, routes: remote.routes.map((route) => route.id === nextRoute.id ? nextRoute : route)},
+        {id: newChangeId(), kind: 'saveRoute', value: nextRoute, previousStopIds});
+      if (!nextRoute.currentDestinationStopId) {
+        setDirectTravel((prev) => prev?.routeId === nextRoute.id ? null : prev);
+      }
+      setDataError(null);
+    } catch (error) {
+      reportError(error);
+      throw error;
+    }
   };
-
-  const pushImmediateDestinationLocation = useCallback(
-    (destinationName: string, routeObj?: RoutePlan | null) => {
-      if (!session || !userPosition) return;
-      void fetch('/api/team/location', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${session.token}`,
-        },
-        body: JSON.stringify({
-          lat: userPosition.lat,
-          lng: userPosition.lng,
-          routeId: routeObj?.id || null,
-          routeName: routeObj?.nome || null,
-          destinationName,
-        }),
-      }).catch(() => {});
-    },
-    [session, userPosition]
-  );
 
   const handleSelectDestination = (routeId: string, stopId: string, forceSelect = false) => {
     const target = routes.find((r) => r.id === routeId);
@@ -611,7 +541,6 @@ export default function App() {
         routeId: target.id,
         updatedAt: now,
       });
-      pushImmediateDestinationLocation(destStop.nome, target);
     } else if (directTravel?.routeId === target.id) {
       setDirectTravel(null);
     }
@@ -625,6 +554,40 @@ export default function App() {
     });
   };
 
+  const handleSelectCompanyDestination = (routeId: string, sendNotice = false, remainingDurationSec?: number) => {
+    const target = routes.find((r) => r.id === routeId);
+    if (!target || !company) return;
+    setDirectTravel(null);
+    const updated = {...target, status: 'em_andamento' as const,
+      currentDestinationStopId: COMPANY_DESTINATION_ID,
+      activeDriverName: currentUserName, updatedAt: new Date().toISOString()};
+    persistRouteUpdate(updated, undefined, sendNotice && profile?.id === THIAGO_USER_ID && profile.role === 'admin', remainingDurationSec);
+  };
+
+  const handleArriveAtStop = (routeId: string, stopId: string) => {
+    const target = routes.find((route) => route.id === routeId);
+    if (!target || target.currentDestinationStopId !== stopId) return;
+    setDirectTravel((previous) => previous?.routeId === routeId ? null : previous);
+    void persistRouteUpdate({...target, currentDestinationStopId: arrivedDestinationId(stopId),
+      updatedAt: new Date().toISOString()});
+  };
+
+  const handleStopTravel = (routeId: string) => {
+    const target = routes.find((route) => route.id === routeId);
+    if (!target) return;
+    setDirectTravel((previous) => previous?.routeId === routeId ? null : previous);
+    void persistRouteUpdate({...target, currentDestinationStopId: null,
+      activeDriverName: null, updatedAt: new Date().toISOString()});
+  };
+
+  const handleFinishRoute = (routeId: string) => {
+    const target = routes.find((route) => route.id === routeId);
+    if (!target) return;
+    setDirectTravel((previous) => previous?.routeId === routeId ? null : previous);
+    void persistRouteUpdate({...target, status: 'finalizada', currentDestinationStopId: null,
+      activeDriverName: null, updatedAt: new Date().toISOString()});
+  };
+
   const handleNavigateMapsFromAddress = (m: Marmoraria) => {
     const now = new Date().toISOString();
     // If this marmoraria belongs to an in-progress (or planned) route's pending stops, mark it as current destination
@@ -634,7 +597,7 @@ export default function App() {
           r.status === 'em_andamento' &&
           r.stops.some((s) => s.marmorariaId === m.id && s.status === 'pendente')
       ) ||
-      routes.find((r) => r.stops.some((s) => s.marmorariaId === m.id && s.status === 'pendente')) ||
+      routes.find((r) => r.status !== 'finalizada' && r.stops.some((s) => s.marmorariaId === m.id && s.status === 'pendente')) ||
       null;
 
     if (candidateRoute) {
@@ -659,7 +622,6 @@ export default function App() {
       routeId: candidateRoute?.id || null,
       updatedAt: now,
     });
-    pushImmediateDestinationLocation(m.nome, candidateRoute);
   };
 
   const handleReorderPendingStops = (routeId: string, orderedStopIds: string[]) => {
@@ -686,7 +648,8 @@ export default function App() {
   const handleUpdateStopStatus = (
     routeId: string,
     stopId: string,
-    status: 'pendente' | 'concluida' | 'nao_entregue'
+    status: 'pendente' | 'concluida' | 'nao_entregue',
+    sendNotice = false
   ) => {
     const target = routes.find((r) => r.id === routeId);
     if (!target) return;
@@ -701,18 +664,14 @@ export default function App() {
     const finished = updatedStops.filter((s) => s.status !== 'pendente');
 
     const nextDest =
-      target.currentDestinationStopId === stopId && status !== 'pendente'
+      (target.currentDestinationStopId === stopId || getArrivedStopId(target.currentDestinationStopId) === stopId) && status !== 'pendente'
         ? null
         : target.currentDestinationStopId;
 
-    const nextStatus =
-      pending.length === 0 && finished.length > 0
-        ? 'finalizada'
-        : pending.length > 0
-        ? 'em_andamento'
-        : target.status;
+    const nextStatus = target.status === 'finalizada' && status !== 'pendente'
+      ? 'finalizada' : updatedStops.length > 0 ? 'em_andamento' : 'planejada';
 
-    if (target.currentDestinationStopId === stopId && status !== 'pendente') {
+    if ((target.currentDestinationStopId === stopId || getArrivedStopId(target.currentDestinationStopId) === stopId) && status !== 'pendente') {
       setDirectTravel((prev) => (prev?.routeId === routeId ? null : prev));
     }
 
@@ -722,7 +681,24 @@ export default function App() {
       currentDestinationStopId: nextDest,
       status: nextStatus,
       updatedAt: now,
-    });
+    }, sendNotice && profile?.id === THIAGO_USER_ID && profile.role === 'admin' && status === 'concluida' &&
+      target.stops.find((s) => s.stopId === stopId)?.status !== 'concluida' ? stopId : undefined);
+  };
+
+  const requestStopStatusUpdate = (routeId: string, stopId: string,
+    status: 'pendente' | 'concluida' | 'nao_entregue') => {
+    const stop = routes.find((route) => route.id === routeId)?.stops.find((item) => item.stopId === stopId);
+    if (status === 'concluida' && stop?.status !== 'concluida' && profile?.id === THIAGO_USER_ID && profile.role === 'admin') {
+      setCompletionToConfirm({routeId, stopId, name: stop?.nome || 'esta entrega'});
+      return;
+    }
+    handleUpdateStopStatus(routeId, stopId, status);
+  };
+
+  const confirmCompletion = (sendNotice: boolean) => {
+    if (!completionToConfirm) return;
+    handleUpdateStopStatus(completionToConfirm.routeId, completionToConfirm.stopId, 'concluida', sendNotice);
+    setCompletionToConfirm(null);
   };
 
   const handleSaveMarmoraria = async (data: {
@@ -746,54 +722,30 @@ export default function App() {
       updatedAt: now,
     };
 
-    if (session) {
-      setTeamMarmorarias((prev) => {
-        const exists = prev.some((m) => m.id === record.id);
-        return exists ? prev.map((m) => (m.id === record.id ? record : m)) : [record, ...prev];
-      });
-      await fetch('/api/team/marmorarias', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${session.token}`,
-        },
-        body: JSON.stringify(record),
-      }).catch(() => {});
-    } else {
-      setLocalMarmorarias((prev) => {
-        const exists = prev.some((m) => m.id === record.id);
-        return exists ? prev.map((m) => (m.id === record.id ? record : m)) : [record, ...prev];
-      });
-    }
+    try {
+      if (!remote) throw new Error('Dados indisponíveis.');
+      const next = remote.marmorarias.some((m) => m.id === record.id)
+        ? remote.marmorarias.map((m) => m.id === record.id ? record : m) : [record, ...remote.marmorarias];
+      await commitChange({...remote, marmorarias: next}, {id: newChangeId(), kind: 'saveMarmoraria', value: record});
+    } catch (error) {reportError(error); return;}
     setShareNotice(null);
   };
 
   const handleDeleteMarmoraria = async (id: string) => {
-    if (session) {
-      setTeamMarmorarias((prev) => prev.filter((m) => m.id !== id));
-      await fetch(`/api/team/marmorarias/${id}`, {
-        method: 'DELETE',
-        headers: {Authorization: `Bearer ${session.token}`},
-      }).catch(() => {});
-    } else {
-      setLocalMarmorarias((prev) => prev.filter((m) => m.id !== id));
-    }
+    if (profile?.role !== 'admin') return;
+    try {
+      if (!remote) throw new Error('Dados indisponíveis.');
+      await commitChange({...remote, marmorarias: remote.marmorarias.filter((m) => m.id !== id)},
+        {id: newChangeId(), kind: 'deleteMarmoraria', value: id});
+    } catch (error) {reportError(error);}
   };
 
   const handleSaveTemplates = async (nextTemplates: WhatsAppTemplate[]) => {
-    if (session) {
-      setTeamTemplates(nextTemplates);
-      await fetch('/api/team/templates', {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${session.token}`,
-        },
-        body: JSON.stringify({templates: nextTemplates}),
-      }).catch(() => {});
-    } else {
-      setLocalTemplates(nextTemplates);
-    }
+    try {
+      if (!remote) throw new Error('Dados indisponíveis.');
+      await commitChange({...remote, templates: nextTemplates},
+        {id: newChangeId(), kind: 'saveTemplates', value: nextTemplates});
+    } catch (error) {reportError(error);}
   };
 
   const openNewMarmoraria = (openInMap = false) => {
@@ -805,32 +757,164 @@ export default function App() {
     setMarmModalOpen(true);
   };
 
+  const handleSaveCompany = async (nextCompany: CompanyLocation | null) => {
+    if (profile?.role !== 'admin') return;
+    try {
+      if (!remote) throw new Error('Dados indisponíveis.');
+      await commitChange({...remote, company: nextCompany},
+        {id: newChangeId(), kind: 'saveCompany', value: nextCompany});
+    } catch (error) {reportError(error);}
+  };
+
+  if (!authReady) return <div className="flex min-h-screen items-center justify-center bg-[#0d100e] text-[#baff27]">Carregando...</div>;
+  if (!userId) return <LoginScreen onLogin={() => setDataError(null)} />;
+  if (!remote || !profile) return (
+    <div className="flex min-h-screen flex-col items-center justify-center gap-4 bg-[#0d100e] px-4 text-center text-[#f3f5f2]">
+      <p>{dataError || 'Carregando seus dados...'}</p>
+      {dataError && <button type="button" onClick={() => {clearLastOfflineUser(); void supabase?.auth.signOut({scope: 'local'}); setUserId(null);}} className="min-h-[44px] rounded-xl border border-[#394539] px-4">Voltar ao login</button>}
+    </div>
+  );
+
+  const webhookPendingCount = (readOffline(userId)?.pending || [])
+    .filter((change) => change.kind === 'notifyDelivery' || change.kind === 'notifyReturn' || change.kind === 'notifyCancellation').length;
+  const webhookBaseDisplay = syncing && webhookPendingCount > 0
+    ? {label: 'Enviando', title: 'Webhook sendo encaminhado', color: 'text-[#baff27]', icon: Loader2}
+    : webhookStatus?.state === 'failed'
+      ? {label: 'Falhou', title: 'Falha ao encaminhar o último webhook', color: 'text-red-400', icon: AlertCircle}
+      : webhookPendingCount > 0 || webhookStatus?.state === 'pending'
+        ? {label: 'Pendente', title: `${webhookPendingCount || webhookStatus?.pending || 1} webhook(s) aguardando envio`, color: 'text-[#ff873f]', icon: Send}
+        : webhookStatus?.state === 'sent'
+          ? {label: 'Enviado', title: 'Último webhook encaminhado', color: 'text-[#baff27]', icon: CheckCircle2}
+          : {label: 'Webhook', title: 'Nenhum webhook pendente', color: 'text-[#6f7a71]', icon: Send};
+  const webhookHistory = webhookStatus?.history || [];
+  const webhookCurrentItem = webhookHistory.find((item) => item.state === webhookStatus?.state)
+    || webhookHistory[0]
+    || null;
+  const webhookTarget = webhookCurrentItem
+    ? webhookCurrentItem.kind === 'return' ? 'Retorno' : webhookCurrentItem.kind === 'cancellation' ? 'Cancelamento' : webhookCurrentItem.targetName
+    : '';
+  const webhookDisplay = webhookCurrentItem
+    ? syncing && webhookPendingCount > 0
+      ? {...webhookBaseDisplay, label: `Enviando ${webhookTarget}`, title: `Enviando ${webhookCurrentItem.targetName}`}
+      : webhookStatus?.state === 'failed'
+        ? {...webhookBaseDisplay, label: `Falha: ${webhookTarget}`, title: `Falha ao encaminhar ${webhookCurrentItem.targetName}`}
+        : webhookPendingCount > 0 || webhookStatus?.state === 'pending'
+          ? {...webhookBaseDisplay, label: `${webhookTarget} pendente`, title: `${webhookCurrentItem.targetName} aguardando envio`}
+          : webhookStatus?.state === 'sent'
+            ? {...webhookBaseDisplay, label: `${webhookTarget} · ${webhookTime(webhookCurrentItem.updatedAt)}`, title: `${webhookCurrentItem.targetName} encaminhado`}
+            : webhookBaseDisplay
+    : webhookBaseDisplay;
+  const WebhookIcon = webhookDisplay.icon;
+
   return (
-    <div className="min-h-screen bg-[#0d100e] pb-24 text-[#f3f5f2]">
+    <div className="app-shell min-h-screen bg-[#0d100e] text-[#f3f5f2]">
       {/* Compact Sticky Top Bar */}
-      <header className="sticky top-0 z-30 border-b border-[#1f2620] bg-[#0d100e]/90 backdrop-blur-md">
-        <div className="relative mx-auto flex h-13 max-w-6xl items-center justify-center px-4 sm:px-6">
+      <header className="app-header sticky top-0 z-30 border-b border-[#1f2620] bg-[#0d100e]/90 backdrop-blur-md">
+        <div className="app-header-row relative mx-auto flex max-w-6xl items-center justify-center px-4 sm:px-6">
           <button
             type="button"
-            onClick={() => setTeamDrawerOpen(true)}
-            className="text-base font-extrabold tracking-tight text-[#f3f5f2] whitespace-nowrap"
+            onClick={() => setWebhookPanelOpen(true)}
+            aria-label="Ver detalhes dos webhooks"
+            title={webhookDisplay.title}
+            className={`absolute left-4 inline-flex max-w-[112px] items-center gap-1 text-[9px] font-semibold sm:left-6 sm:max-w-[240px] sm:text-[10px] ${webhookDisplay.color}`}
           >
-            Rota <span className="text-[#baff27]">Verde</span>
+            <WebhookIcon className={`h-3.5 w-3.5 ${syncing && webhookPendingCount > 0 ? 'animate-spin' : ''}`} />
+            <span className="truncate">{webhookDisplay.label}</span>
+            {webhookPendingCount > 0 && <span className="tabular-nums">({webhookPendingCount})</span>}
           </button>
 
-          {!isOnline && (
-            <div className="absolute right-4 flex items-center sm:right-6">
+          <span className="text-base font-extrabold tracking-tight text-[#f3f5f2] whitespace-nowrap">
+            Rota <span className="text-[#baff27]">Italik</span>
+          </span>
+
+          <div className="absolute right-4 flex items-center gap-3 sm:right-6">
+            <button type="button" onClick={() => {clearLastOfflineUser(); setUserId(null); void supabase?.auth.signOut({scope: 'local'});}} aria-label="Sair da conta" title={`Sair (${profile.display_name})`} className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl text-[#9aa59c] hover:text-[#ff873f]"><LogOut className="h-4 w-4" /></button>
+            {profile.role === 'admin' && <button
+              type="button"
+              onClick={() => setSettingsOpen(true)}
+              aria-label="Configurações"
+              className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded-xl text-[#baff27] hover:bg-[#baff27]/10"
+            >
+              <Settings className="h-5 w-5" />
+            </button>}
+            {!isOnline && (
               <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#ff873f]">
                 <WifiOff className="h-3.5 w-3.5" />
                 <span className="hidden sm:inline">Offline</span>
               </span>
-            </div>
-          )}
+            )}
+          </div>
         </div>
       </header>
 
+      {webhookPanelOpen && (
+        <div
+          className="app-modal-backdrop app-modal-centered fixed inset-0 z-[1000] flex items-center justify-center bg-black/75 px-4"
+          role="presentation"
+          onMouseDown={(event) => {if (event.target === event.currentTarget) setWebhookPanelOpen(false);}}
+        >
+          <div role="dialog" aria-modal="true" aria-labelledby="webhook-history-title" className="w-full max-w-md rounded-2xl border border-[#394539] bg-[#151a16] p-5 shadow-2xl">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 id="webhook-history-title" className="text-lg font-bold text-[#f3f5f2]">Envios do webhook</h2>
+                <p className="mt-1 text-xs text-[#9aa59c]">Últimos cinco avisos gerados pelo aplicativo.</p>
+              </div>
+              <button type="button" onClick={() => setWebhookPanelOpen(false)} aria-label="Fechar histórico do webhook" className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-[#9aa59c] hover:bg-[#202721] hover:text-[#f3f5f2]"><X className="h-4 w-4" /></button>
+            </div>
+
+            {webhookHistory.length === 0 ? (
+              <div className="mt-4 rounded-xl border border-[#283129] bg-[#101411] p-4 text-sm text-[#bdc7bd]">
+                O próximo envio mostrará aqui a marmoraria, a rota, o horário e o resultado.
+              </div>
+            ) : (
+              <ul className="mt-4 max-h-[60vh] space-y-2 overflow-y-auto pr-1">
+                {webhookHistory.map((item) => {
+                  const ItemIcon = item.state === 'sent' ? CheckCircle2 : item.state === 'failed' ? AlertCircle : Send;
+                  const stateColor = item.state === 'sent' ? 'text-[#baff27]' : item.state === 'failed' ? 'text-red-400' : 'text-[#ff873f]';
+                  return (
+                    <li key={item.eventId} className="rounded-xl border border-[#283129] bg-[#101411] p-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-bold text-[#f3f5f2]">{item.targetName}</p>
+                          <p className="mt-0.5 truncate text-xs text-[#9aa59c]">{item.routeName}</p>
+                        </div>
+                        <span className={`inline-flex shrink-0 items-center gap-1 text-[11px] font-bold ${stateColor}`}>
+                          <ItemIcon className="h-3.5 w-3.5" />{webhookStateLabel[item.state]}
+                        </span>
+                      </div>
+                      <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 text-[11px]">
+                        <dt className="text-[#6f7a71]">Evento</dt>
+                        <dd className="text-[#bdc7bd]">{item.kind === 'delivery' ? 'Parada concluída' : item.kind === 'return' ? 'Retorno à empresa' : 'Rota cancelada'}</dd>
+                        <dt className="text-[#6f7a71]">Aconteceu</dt>
+                        <dd className="text-[#bdc7bd] tabular-nums">{webhookDateTime(item.occurredAt)}</dd>
+                        <dt className="text-[#6f7a71]">{item.state === 'sent' ? 'Enviado' : 'Atualizado'}</dt>
+                        <dd className="text-[#bdc7bd] tabular-nums">{webhookDateTime(item.updatedAt)}</dd>
+                      </dl>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+
+            {webhookPendingCount > 0 && (
+              <p className="mt-3 text-xs font-semibold text-[#ff873f] tabular-nums">
+                {webhookPendingCount} {webhookPendingCount === 1 ? 'aviso aguardando envio' : 'avisos aguardando envio'}.
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Main Content */}
       <main className="mx-auto max-w-6xl px-4 pt-5 sm:px-6">
+        {(!isOnline || pendingCount > 0 || syncing) && <div role="status" className="mb-4 rounded-xl border border-[#ff873f]/40 bg-[#ff873f]/10 px-3 py-2 text-xs text-[#ffad73]">
+          {!isOnline ? 'Offline: alterações salvas neste aparelho. Serão sincronizadas ao voltar a conexão.' : syncing ? 'Sincronizando alterações...' :
+            (readOffline(userId)?.pending || []).every((change) => change.kind === 'notifyDelivery' || change.kind === 'notifyReturn' || change.kind === 'notifyCancellation')
+              ? `${pendingCount} aviso(s) aguardando envio.`
+              : `${pendingCount} alteração(ões) aguardando sincronização.`}
+          {isOnline && pendingCount > 0 && !syncing && <button type="button" onClick={() => void syncOfflineData(userId)} className="ml-2 font-bold underline">Tentar agora</button>}
+        </div>}
+        {dataError && <div role="alert" className="mb-4 rounded-xl border border-[#ff873f] bg-[#ff873f]/10 p-3 text-sm text-[#ffad73]">{dataError}<button type="button" onClick={() => setDataError(null)} className="ml-3 underline">Fechar</button></div>}
         {(() => {
           const activeRouteWithDest =
             routes.find((r) => {
@@ -853,27 +937,36 @@ export default function App() {
               {activeTab === 'rotas' && !activeRoute && (
                 <RoutesListView
                   routes={routes}
+                  company={company}
+                  distances={routeDistances}
                   onOpenRoute={handleOpenRoute}
                   onCreateRoute={() => setCreateRouteOpen(true)}
+                  onFinishRoute={handleFinishRoute}
                 />
               )}
 
               {activeTab === 'rotas' && activeRoute && (
                 <RouteDetailView
                   route={activeRoute}
+                  marmorarias={marmorarias}
+                  company={company}
                   userPosition={userPosition}
                   geoError={geoError}
-                  onBack={() => setSelectedRouteId(null)}
                   onRequestGeo={requestGeolocation}
                   onRenameRoute={handleRenameRoute}
                   onDeleteRoute={(id) => void handleDeleteRoute(id)}
+                  onCancelRoute={handleCancelRoute}
+                  onRemoveStop={handleRemoveStop}
+                  canDelete={profile.role === 'admin'}
                   onOpenAddStops={() => setAddStopsOpen(true)}
                   onSelectDestination={handleSelectDestination}
+                  onSelectCompanyDestination={handleSelectCompanyDestination}
+                  onStopTravel={handleStopTravel}
+                  canSendReturnNotice={profile.id === THIAGO_USER_ID && profile.role === 'admin'}
+                  canSendCancellationNotice={profile.id === THIAGO_USER_ID && profile.role === 'admin'}
                   onReorderPendingStops={handleReorderPendingStops}
-                  onUpdateStopStatus={handleUpdateStopStatus}
-                  onOpenWhatsApp={(stop) =>
-                    setWhatsAppTarget({name: stop.nome, phone: stop.telefone})
-                  }
+                  onUpdateStopStatus={requestStopStatusUpdate}
+                  onOpenWhatsApp={openWhatsAppFor}
                 />
               )}
 
@@ -891,38 +984,34 @@ export default function App() {
                     setMarmModalOpen(true);
                   }}
                   onDelete={(id) => void handleDeleteMarmoraria(id)}
-                  onOpenWhatsApp={(m) => setWhatsAppTarget({name: m.nome, phone: m.telefone})}
+                  canDelete={profile.role === 'admin'}
+                  onOpenWhatsApp={openWhatsAppFor}
                   onNavigateMaps={handleNavigateMapsFromAddress}
+                  collectionCounts={collectionCounts}
                 />
               )}
 
-              {activeTab === 'localizar' && (
-                <LocateView
-                  session={session}
-                  teamUsers={teamUsers}
-                  routes={routes}
-                  driverLocations={driverLocations}
-                  isSharingOwnLocation={Boolean(session && activeInProgressRoute && userPosition)}
-                  onRefreshLocations={() => session && void fetchTeamState(session)}
-                  onOpenTeamMenu={() => setTeamDrawerOpen(true)}
-                />
+              {activeTab === 'relatorios' && (
+                <ReportsView collections={collections} marmorarias={marmorarias} routes={routes}
+                  distances={routeDistances} distancesLoading={distancesLoading} />
               )}
+
             </>
           );
         })()}
       </main>
 
-      {/* Fixed Bottom Navigation Bar (3 Tabs) */}
+      {/* Fixed Bottom Navigation Bar */}
       <nav
         aria-label="Navegação principal"
-        className="fixed right-0 bottom-0 left-0 z-40 border-t border-[#1f2620] bg-[#0d100e]/95 backdrop-blur-md pb-safe"
+        className="app-bottom-nav fixed right-0 bottom-0 left-0 z-40 border-t border-[#1f2620] bg-[#0d100e]"
       >
-        <div className="mx-auto grid h-16 max-w-6xl grid-cols-3 items-center">
+        <div className="app-bottom-nav-row mx-auto grid max-w-6xl grid-cols-3 items-center">
           {(
             [
               {id: 'rotas', label: 'Rotas', Icon: RouteIcon},
               {id: 'enderecos', label: 'Endereços', Icon: MapPin},
-              {id: 'localizar', label: 'Localizar', Icon: Compass},
+              {id: 'relatorios', label: 'Relatórios', Icon: BarChart3},
             ] as const
           ).map(({id, label, Icon}) => {
             const isActive = activeTab === id;
@@ -950,7 +1039,37 @@ export default function App() {
         </div>
       </nav>
 
-      {/* Modals & Team Drawer */}
+      {/* Modals */}
+      {completionToConfirm && (
+        <div className="app-modal-backdrop app-modal-centered fixed inset-0 z-[1000] flex items-center justify-center bg-black/75 px-4">
+          <div role="dialog" aria-modal="true" aria-labelledby="completion-notice-title"
+            className="w-full max-w-sm rounded-2xl border border-[#394539] bg-[#151a16] p-5 shadow-2xl">
+            <h2 id="completion-notice-title" className="text-base font-bold text-[#f3f5f2]">Concluir {completionToConfirm.name}?</h2>
+            <p className="mt-2 text-sm text-[#b7c1b8]">Deseja enviar o aviso pelo WhatsApp? O envio será solicitado à automação configurada.</p>
+            <div className="mt-5 flex flex-col gap-2">
+              <button type="button" onClick={() => confirmCompletion(true)}
+                className="inline-flex min-h-[46px] w-full items-center justify-center gap-2 rounded-xl bg-[#baff27] px-4 text-sm font-bold text-[#0d100e]">
+                <Check className="h-4 w-4" />Concluir e enviar aviso
+              </button>
+              <button type="button" onClick={() => confirmCompletion(false)}
+                className="inline-flex min-h-[46px] w-full items-center justify-center gap-2 rounded-xl border border-[#394539] px-4 text-sm font-semibold text-[#f3f5f2]">
+                Concluir sem enviar
+              </button>
+              <button type="button" onClick={() => setCompletionToConfirm(null)}
+                className="inline-flex min-h-[42px] w-full items-center justify-center gap-2 text-sm text-[#9aa59c]">
+                <X className="h-4 w-4" />Cancelar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      <SettingsModal
+        isOpen={settingsOpen}
+        company={company}
+        canManageWebhook={profile.id === THIAGO_USER_ID && profile.role === 'admin'}
+        onClose={() => setSettingsOpen(false)}
+        onSave={(next) => void handleSaveCompany(next)}
+      />
       <MarmorariaModal
         isOpen={marmModalOpen}
         initialData={editingMarm}
@@ -974,10 +1093,13 @@ export default function App() {
         onClose={() => setWhatsAppTarget(null)}
         onSaveTemplates={(next) => void handleSaveTemplates(next)}
       />
+      {phoneTarget && <PhoneModal key={phoneTarget.id} marmoraria={phoneTarget}
+        onClose={() => setPhoneTarget(null)} onSave={saveCustomerPhone} />}
 
       <CreateRouteModal
         isOpen={createRouteOpen}
         marmorarias={marmorarias}
+        routes={routes}
         onClose={() => setCreateRouteOpen(false)}
         onCreate={(nome, ids) => void handleCreateRoute(nome, ids)}
       />
@@ -986,29 +1108,11 @@ export default function App() {
         isOpen={addStopsOpen}
         marmorarias={marmorarias}
         currentStops={activeRoute?.stops || []}
+        routeId={activeRoute?.id || null}
         onClose={() => setAddStopsOpen(false)}
         onApply={handleApplyRouteStops}
       />
 
-      <TeamDrawer
-        isOpen={teamDrawerOpen}
-        session={session}
-        teamUsers={teamUsers}
-        localUserName={localUserName}
-        marmorarias={marmorarias}
-        routes={routes}
-        templates={templates}
-        onClose={() => setTeamDrawerOpen(false)}
-        onChangeLocalUserName={setLocalUserName}
-        onAuthSuccess={(newSession) => setSession(newSession)}
-        onLogout={() => {
-          setSession(null);
-          setTeamUsers([]);
-          setDriverLocations([]);
-          setSelectedRouteId(null);
-        }}
-        onUsersUpdated={setTeamUsers}
-      />
     </div>
   );
 }

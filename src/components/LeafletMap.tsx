@@ -1,19 +1,18 @@
 import L from 'leaflet';
 import {useEffect, useRef} from 'react';
-import type {Coordinates, DriverLocation, RouteStop} from '../types.ts';
-import {formatRelativeTimePt} from '../utils/geo.ts';
+import type {CompanyLocation, Coordinates, RouteStop} from '../types.ts';
 
 export interface AppMapProps {
-  mode: 'route' | 'pick' | 'drivers';
+  mode: 'route' | 'pick';
   stops?: RouteStop[];
+  company?: CompanyLocation | null;
   currentDestinationStopId?: string | null;
   userPosition?: Coordinates | null;
   pickedPosition?: Coordinates | null;
-  driverLocations?: DriverLocation[];
-  focusedDriverId?: string | null;
   onPickCoordinates?: (coords: Coordinates) => void;
   onSelectStop?: (stopId: string) => void;
-  onSelectDriver?: (userId: string) => void;
+  manualOrderIds?: string[];
+  manualOrderingActive?: boolean;
   className?: string;
 }
 
@@ -32,14 +31,14 @@ function escapeHtml(text: string): string {
 export function LeafletMap({
   mode,
   stops = [],
+  company = null,
   currentDestinationStopId = null,
   userPosition = null,
   pickedPosition = null,
-  driverLocations = [],
-  focusedDriverId = null,
   onPickCoordinates,
   onSelectStop,
-  onSelectDriver,
+  manualOrderIds = [],
+  manualOrderingActive = false,
   className = 'h-64 w-full',
 }: AppMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -48,11 +47,9 @@ export function LeafletMap({
   const hasFittedRef = useRef<string>('');
   const onPickRef = useRef(onPickCoordinates);
   const onSelectStopRef = useRef(onSelectStop);
-  const onSelectDriverRef = useRef(onSelectDriver);
 
   onPickRef.current = onPickCoordinates;
   onSelectStopRef.current = onSelectStop;
-  onSelectDriverRef.current = onSelectDriver;
 
   useEffect(() => {
     const el = containerRef.current;
@@ -110,57 +107,32 @@ export function LeafletMap({
     const boundsPoints: [number, number][] = [];
 
     if (mode === 'route') {
-      const pendingStops = stops.filter((s) => s.status === 'pendente');
-
-      if (userPosition) {
-        boundsPoints.push([userPosition.lat, userPosition.lng]);
-        const userIcon = L.divIcon({
-          className: 'rota-stop-pin-wrapper',
-          iconSize: [0, 0],
-          iconAnchor: [0, 0],
-          html: `
-            <div style="transform: translate(-50%, -50%); display:flex; flex-direction:column; align-items:center;">
-              <div style="background:rgba(13,16,14,0.92); color:#baff27; border:1px solid rgba(186,255,39,0.6); border-radius:6px; padding:1px 6px; font-size:10px; font-weight:700; white-space:nowrap; margin-bottom:4px;">Sua posição</div>
-              <div style="width:14px; height:14px; border-radius:9999px; background:#baff27; border:3px solid #0d100e; box-shadow:0 0 0 4px rgba(186,255,39,0.3);"></div>
-            </div>
-          `,
-        });
-        L.marker([userPosition.lat, userPosition.lng], {icon: userIcon, zIndexOffset: 500}).addTo(
-          group
-        );
-      }
-
-      // Subtle dashed visual line connecting user position -> pending stops
-      if (pendingStops.length > 0) {
-        const lineCoords: [number, number][] = [];
-        if (userPosition) lineCoords.push([userPosition.lat, userPosition.lng]);
-        pendingStops.forEach((s) => lineCoords.push([s.lat, s.lng]));
-        if (lineCoords.length >= 2) {
-          L.polyline(lineCoords, {
-            color: '#ff873f',
-            weight: 2.5,
-            opacity: 0.72,
-            dashArray: '6, 6',
-          }).addTo(group);
-        }
-      }
-
       let pendingIdx = 0;
       stops.forEach((stop) => {
         const isPending = stop.status === 'pendente';
         const isActive = stop.stopId === currentDestinationStopId && isPending;
         if (isPending) pendingIdx += 1;
-        const labelNum = isPending ? String(pendingIdx) : stop.status === 'concluida' ? '✓' : '✕';
+        const manualIndex = manualOrderIds.indexOf(stop.stopId);
+        const labelNum = isPending
+          ? manualOrderingActive
+            ? manualIndex >= 0 ? String(manualIndex + 1) : '•'
+            : String(pendingIdx)
+          : stop.status === 'concluida' ? '✓' : '✕';
+        const isManuallySelected = manualOrderingActive && manualIndex >= 0;
 
         boundsPoints.push([stop.lat, stop.lng]);
 
-        const labelCls = isActive
+        const labelCls = isManuallySelected
+          ? 'rota-stop-label rota-stop-label--manual'
+          : isActive
           ? 'rota-stop-label rota-stop-label--active'
           : isPending
           ? 'rota-stop-label'
           : 'rota-stop-label rota-stop-label--done';
 
-        const dotCls = isActive
+        const dotCls = isManuallySelected
+          ? 'rota-stop-dot rota-stop-dot--manual'
+          : isActive
           ? 'rota-stop-dot rota-stop-dot--active'
           : isPending
           ? 'rota-stop-dot'
@@ -194,9 +166,9 @@ export function LeafletMap({
       if (boundsPoints.length > 0 && hasFittedRef.current !== fitKey) {
         hasFittedRef.current = fitKey;
         if (boundsPoints.length === 1) {
-          map.setView(boundsPoints[0], 14);
+          map.setView(boundsPoints[0], 14, {animate: false});
         } else {
-          map.fitBounds(L.latLngBounds(boundsPoints), {padding: [42, 42], maxZoom: 15});
+          map.fitBounds(L.latLngBounds(boundsPoints), {padding: [42, 42], maxZoom: 15, animate: false});
         }
       }
     } else if (mode === 'pick') {
@@ -214,84 +186,56 @@ export function LeafletMap({
         });
         L.marker([pickedPosition.lat, pickedPosition.lng], {icon: pinIcon}).addTo(group);
         const fitKey = `pick:${pickedPosition.lat.toFixed(4)},${pickedPosition.lng.toFixed(4)}`;
-        if (hasFittedRef.current === '') {
+        if (hasFittedRef.current !== fitKey) {
           hasFittedRef.current = fitKey;
-          map.setView([pickedPosition.lat, pickedPosition.lng], 15);
+            map.setView([pickedPosition.lat, pickedPosition.lng], 15, {animate: false});
         }
       } else if (userPosition && hasFittedRef.current === '') {
         hasFittedRef.current = 'pick:user';
-        map.setView([userPosition.lat, userPosition.lng], 13);
+        map.setView([userPosition.lat, userPosition.lng], 13, {animate: false});
       }
-    } else if (mode === 'drivers') {
-      const now = Date.now();
-      driverLocations.forEach((loc) => {
-        const rel = formatRelativeTimePt(loc.updatedAt, now);
-        const isLive = rel.freshness === 'live';
-        const isStale = rel.freshness === 'stale';
-        const isFocused = loc.userId === focusedDriverId;
-        const color = isLive ? '#baff27' : isStale ? '#ff873f' : '#7b877e';
-        const statusText = isLive
-          ? rel.label
-          : isStale
-          ? `Antiga (${rel.label})`
-          : `Indisponível (${rel.label})`;
 
-        boundsPoints.push([loc.lat, loc.lng]);
-
-        const icon = L.divIcon({
-          className: 'rota-stop-pin-wrapper',
-          iconSize: [0, 0],
-          iconAnchor: [0, 0],
-          html: `
-            <div class="rota-stop-pin">
-              <div class="rota-stop-label" style="border-color:${isFocused ? '#baff27' : color}; color:${isFocused || isLive ? '#baff27' : '#f3f5f2'};">
-                ${escapeHtml(loc.userName)} · ${escapeHtml(statusText)}
-              </div>
-              <div class="rota-stop-dot" style="background:${color}; color:#0d100e; width:26px; height:26px; ${isFocused ? 'box-shadow:0 0 0 4px rgba(186,255,39,0.4);' : ''}">
-                ${escapeHtml(loc.userName.charAt(0).toUpperCase())}
-              </div>
-            </div>
-          `,
-        });
-
-        const marker = L.marker([loc.lat, loc.lng], {
-          icon,
-          zIndexOffset: isFocused ? 500 : isLive ? 400 : 200,
-        }).addTo(group);
-
-        marker.on('click', () => {
-          onSelectDriverRef.current?.(loc.userId);
-        });
-      });
-
-      const focused = focusedDriverId
-        ? driverLocations.find((d) => d.userId === focusedDriverId)
-        : null;
-      const fitKey = focused
-        ? `drivers:focus:${focused.userId}:${focused.lat}:${focused.lng}`
-        : `drivers:${driverLocations.map((d) => `${d.userId}:${d.lat}:${d.lng}`).join(',')}`;
-
-      if (focused && hasFittedRef.current !== fitKey) {
-        hasFittedRef.current = fitKey;
-        map.setView([focused.lat, focused.lng], 15);
-      } else if (boundsPoints.length > 0 && hasFittedRef.current !== fitKey) {
-        hasFittedRef.current = fitKey;
-        if (boundsPoints.length === 1) {
-          map.setView(boundsPoints[0], 14);
-        } else {
-          map.fitBounds(L.latLngBounds(boundsPoints), {padding: [45, 45], maxZoom: 15});
-        }
-      }
     }
   }, [
     mode,
     stops,
+    company,
     currentDestinationStopId,
     userPosition,
     pickedPosition,
-    driverLocations,
-    focusedDriverId,
+    manualOrderIds,
+    manualOrderingActive,
   ]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    let secondFrame = 0;
+    const refreshSizeAndTiles = () => {
+      map.invalidateSize({animate: false, pan: false});
+      map.eachLayer((layer) => {
+        if (layer instanceof L.TileLayer) layer.redraw();
+      });
+    };
+
+    const firstFrame = requestAnimationFrame(() => {
+      refreshSizeAndTiles();
+      secondFrame = requestAnimationFrame(refreshSizeAndTiles);
+    });
+    const delayedRefresh = window.setTimeout(refreshSizeAndTiles, 250);
+
+    window.addEventListener('resize', refreshSizeAndTiles);
+    window.addEventListener('orientationchange', refreshSizeAndTiles);
+
+    return () => {
+      cancelAnimationFrame(firstFrame);
+      cancelAnimationFrame(secondFrame);
+      window.clearTimeout(delayedRefresh);
+      window.removeEventListener('resize', refreshSizeAndTiles);
+      window.removeEventListener('orientationchange', refreshSizeAndTiles);
+    };
+  }, [className]);
 
   return (
     <div

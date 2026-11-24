@@ -1,10 +1,8 @@
-export type TabId = 'rotas' | 'enderecos' | 'localizar';
+export type TabId = 'rotas' | 'enderecos' | 'relatorios';
 
 export type StopStatus = 'pendente' | 'concluida' | 'nao_entregue';
 
 export type RouteStatus = 'planejada' | 'em_andamento' | 'finalizada';
-
-export type UserRole = 'organizador' | 'motorista';
 
 export interface Marmoraria {
   id: string;
@@ -43,42 +41,30 @@ export interface RoutePlan {
   updatedAt: string;
 }
 
+export const COMPANY_DESTINATION_ID = '__company__';
+export const ARRIVED_DESTINATION_PREFIX = '__arrived__:';
+
+export function arrivedDestinationId(stopId: string) {
+  return `${ARRIVED_DESTINATION_PREFIX}${stopId}`;
+}
+
+export function getArrivedStopId(destinationId: string | null) {
+  return destinationId?.startsWith(ARRIVED_DESTINATION_PREFIX)
+    ? destinationId.slice(ARRIVED_DESTINATION_PREFIX.length) : null;
+}
+
 export interface WhatsAppTemplate {
   id: string;
   titulo: string;
   mensagem: string;
 }
 
-export interface TeamUser {
-  id: string;
-  name: string;
-  login: string;
-  role: UserRole;
-  createdAt: string;
-}
-
-export interface TeamSession {
-  token: string;
-  teamId: string;
-  teamName: string;
-  teamCode: string;
-  user: TeamUser;
-}
-
-export interface DriverLocation {
-  userId: string;
-  userName: string;
-  role: UserRole;
-  lat: number;
-  lng: number;
-  accuracy?: number;
-  routeId?: string | null;
-  routeName?: string | null;
-  destinationName?: string | null;
-  updatedAt: string;
-}
-
 export interface Coordinates {
   lat: number;
   lng: number;
+}
+
+export interface CompanyLocation extends Coordinates {
+  name: string;
+  address: string;
 }
